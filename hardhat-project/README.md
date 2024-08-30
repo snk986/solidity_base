@@ -18,6 +18,6 @@ npx hardhat ignition deploy ./ignition/modules/Lock.js
 3、npx hardhat compile   Error HH1: You are not inside a Hardhat project. 报错是因为没有目录不对，没有进入Hardhat项目
 # hardhat错误码： https://hardhat.org/hardhat-runner/docs/errors
 4、出现Error HH5等错误时，HH505，用npx hardhat clean --global，然后重新执行，
-继续出现HH501、HH502、HH503可能是网络原因，查看是否官方源，是就继续执行
+继续出现HH501、HH502、HH503可能是网络原因，查看是否官方源，是就继续执行，还有一个重要原因是设置了DNS
 5、如果是nvm、node、npm等原因，删除nvm和node，重新安装，记得环境变量和用户里的配置文件也删除干净
 
