@@ -184,17 +184,82 @@ await contractA.updateValue(42);
   - `feed.info{value: 10, gas: 800}(2);`
   - 注意 `feed.info{value: 10, gas: 800}` 仅（局部地）设置了与函数调用一起发送的 Wei 值和 gas 的数量，只有最后的小括号才执行了真正的调用。 因此， `feed.info{value: 10, gas: 800}` 是没有调用函数的， `value` 和 `gas` 设置是无效的。
 # 解答
+contract Feed {
+    event DataReceived(uint256 data, address sender, uint256 amount);
 
-- extcodesize 操作码会检查要调用的合约是否确实存在，有哪些特殊情况？
+    function info(uint256 data) external payable {
+        require(msg.value > 0, "Ether value must be greater than 0");
+        
+        emit DataReceived(data, msg.sender, msg.value);
+        // 这里可以处理接收到的 Ether 和 data 参数
+    }
+}
+contract Example {
+    Feed feed; // Feed 合约的实例
+
+    constructor(address feedAddress) {
+        feed = Feed(feedAddress); // 初始化 feed 实例
+    }
+
+    function callInfo() external payable {
+        require(msg.value == 10 wei, "Must send exactly 10 Wei");
+        
+        // 调用 info 函数，发送 Ether
+        feed.info{value: msg.value}(2); // 传递 10 Wei 和参数 2
+    }
+}
+
+# extcodesize 操作码会检查要调用的合约是否确实存在，有哪些特殊情况？
   - 低级 call 调用，会绕过检查
   - 预编译合约的时候，也会绕过检查。
+# 解答：
+1、低级 call 调用: 使用低级 call 调用时，你可以直接与合约交互，而不进行 extcodesize 的检查。这意味着即使目标地址没有合约代码，调用依然可以执行，而不会阻止交易。
+contract Example {
+    function callExternal(address _addr, bytes memory _data) external {
+        (bool success, ) = _addr.call(_data);
+        require(success, "Call failed");
+    }
+}
+在上述示例中，如果 _addr 指向一个非合约地址或没有代码的地址，call 调用仍然会被执行，而不会因 extcodesize 返回 0 而失败。
+2、预编译合约:预编译合约（如某些地址上已实现的特定功能）可以绕过 extcodesize 检查，因为它们在特定地址上存在且被直接调用。这些地址可能并没有相应的 Solidity 合约代码，但仍能响应调用。
 
-- 与其他和月交互时候有什么需要注意的？
+# 与其他合约交互时候有什么需要注意的？
   - 任何与其他合约的交互都会产生潜在危险，尤其是在不能预先知道合约代码的情况下。
   - 小心这个交互调用在返回之前再回调我们的合约，这意味着被调用合约可以通过它自己的函数改变调用合约的状态变量。 一个建议的函数写法是，例如，**在合约中状态变量进行各种变化后再调用外部函数**，这样，你的合约就不会轻易被滥用的重入攻击 (reentrancy) 所影响
+# 解答：
+1. 重入攻击（Reentrancy）
+问题: 在调用外部合约时，如果该合约在执行过程中可以再次调用原合约，这可能导致重入攻击，修改状态变量的不安全性。
+解决方案:
+使用状态变量锁定: 在调用外部合约之前，先更改状态变量，确保不会被重入。
+采用“检查-效果-交互”模式: 在执行状态变更（检查）后，进行外部调用（交互）
+function withdraw(uint256 amount) external {
+    require(balance[msg.sender] >= amount, "Insufficient balance");
+
+    // 更新状态
+    balance[msg.sender] -= amount;
+
+    // 调用外部合约
+    (bool success, ) = msg.sender.call{value: amount}("");
+    require(success, "Transfer failed");
+}
+
 
 # public 既可以被当作内部函数也可以被当作外部函数。使用时候有什么注意的？
   - 如果想将一个函数当作内部函数使用，就用 `f` 调用，如果想将其当作外部函数，使用 `this.f` 。
+# 解答：
+1. 调用方式
+function internalFunction() public {
+    // 内部逻辑
+}
+
+function caller() public {
+    internalFunction(); // 内部调用
+}
+function caller() public {
+    this.externalFunction(); // 外部调用
+}
+2. Gas 成本
+注意: 外部调用会增加 gas 消耗，尤其是在复杂操作中。应根据需要选择调用方式，以优化合约的执行效率。
 
 # pure 函数中，哪些行为被视为读取状态。
   - 读取状态变量。
@@ -205,11 +270,78 @@ await contractA.updateValue(42);
   - **使用包含特定操作码的内联汇编。**
     - `TODO:` 这个不了解，需要用例子加深印象。
   - 使用操作码 `STATICCALL` , 这并不保证状态未被读取, 但至少不被修改。
-- pure 函数发生错误时候，有什么需要注意的？
+# 解答：
+1. 读取状态变量
+描述: 访问合约的状态变量，包括 immutable 变量，会导致函数无法被标记为 pure。
+uint256 public stateVariable;
+uint256 immutable immutableVariable;
+function setStateVariable(uint256 _value) public {
+    stateVariable = _value;
+}
+function pureFunction() public view returns (uint256) {
+    return stateVariable; // 这不是一个 pure 函数
+}
+2. 访问 address(this).balance 或 <address>.balance
+描述: 访问合约或外部地址的余额也被视为读取状态。
+function checkBalance() public view returns (uint256) {
+    return address(this).balance; // 这不是一个 pure 函数
+}
+3. 访问 block、tx、msg 的成员
+描述: 这些全局变量的任何成员访问都会导致函数无法被标记为 pure，除了 msg.sig 和 msg.data。
+function getBlockNumber() public view returns (uint256) {
+    return block.number; // 这不是一个 pure 函数
+}
+4. 调用未标记为 pure 的函数
+描述: 调用任何未标记为 pure 的函数会使当前函数无法为 pure。
+function nonPureFunction() public view returns (uint256) {
+    return stateVariable; // 不是 pure
+}
+function anotherFunction() public pure {
+    nonPureFunction(); // 这不是一个 pure 函数
+}
+5. 使用包含特定操作码的内联汇编
+某些操作码的使用会被视为读取状态。这里的操作码包括 sload，它用于从存储中读取值。使用内联汇编进行 sload 会导致当前函数无法标记为 pure
+function inlineAssemblyExample() public pure {
+    assembly {
+        let value := sload(0) // 读取状态变量，导致此函数不是 pure
+    }
+}
+6. 使用 STATICCALL 操作码
+描述: 使用 STATICCALL 来调用其他合约，可以保证不修改状态，但并不保证未读取状态。
+function callAnotherContract(address target) public returns (uint256) {
+    (bool success, bytes memory data) = target.staticcall(abi.encodeWithSignature("someFunction()"));
+    require(success, "Call failed");
+    return abi.decode(data, (uint256));
+}
 
+
+# pure 函数发生错误时候，有什么需要注意的？
   - 如果发生错误，`pure` 函数可以使用 `revert()` 和 `require()` 函数来还原潜在的状态更改。还原状态更改不被视为 **状态修改**, 因为它只还原以前在没有 `view` 或 `pure` 限制的代码中所做的状态更改, 并且代码可以选择捕获 revert 并不传递还原。这种行为也符合 STATICCALL 操作码。
-- view 函数中，哪些行为视为修改状态。
+# 解答:
+1. 使用 revert() 和 require()
+描述: pure 函数可以通过 revert() 和 require() 函数来处理错误。这些函数可以用来终止执行并还原状态。
+function pureFunction(uint256 value) public pure {
+    require(value > 0, "Value must be greater than zero");
+    // 其他逻辑
+}
+2. 状态还原
+描述: 调用 revert() 或 require() 不会修改合约的状态。它只是终止函数执行，并还原到函数调用之前的状态。
+行为: 这种状态还原只适用于在没有 view 或 pure 限制的代码中所做的状态更改。
+3. 与 STATICCALL 的一致性
+描述: revert() 和 require() 的行为与 STATICCALL 操作码相符。在使用 STATICCALL 时，即使发生错误，状态也不会被修改，这确保了调用的安全性。
+4. 捕获和处理错误
+描述: 可以在调用 pure 函数时捕获错误并处理，但要注意，如果不处理 revert() 造成的错误，调用将终止并返回错误信息。
+function caller() public {
+    try this.pureFunction(0) {
+        // 成功逻辑
+    } catch {
+        // 错误处理逻辑
+    }
+}
+5. 关注 gas 消耗
+描述: 即使是 pure 函数，在发生错误时也会消耗一定的 gas。因此，建议在编写逻辑时小心设计以避免不必要的 gas 消耗。
 
+# view 函数中，哪些行为视为修改状态。
   - 修改状态变量。
   - 触发事件。
   - 创建其它合约。
@@ -219,14 +351,15 @@ await contractA.updateValue(42);
   - 使用底层调用
     - (TODO:这里是 call 操作么？)
   - 使用包含某些操作码的内联程序集。
-- pure/view/payable/这些状态可变性的类型转换是怎么样的？
+
+# pure/view/payable/这些状态可变性的类型转换是怎么样的？
 
   - pure 函数可以转换为 view 和 non-payable 函数
   - view 函数可以转换为 non-payable 函数
   - payable 函数可以转换为 non-payable 函数
   - 其他的转换则不可以。
-- 使用 return 时，有哪些需要注意的？
 
+# 使用 return 时，有哪些需要注意的？
   - 函数返回类型不能为空 —— 如果函数类型不需要返回，则需要删除整个 `returns (<return types>)` 部分。
   - 函数可能返回任意数量的参数作为输出。函数的返回值有两个关键字，一个是 `returns`,一个是 `return`;
     - `returns` 是在函数名后面的，用来标示返回值的数量，类型，名字信息。
@@ -234,40 +367,228 @@ await contractA.updateValue(42);
   - 如果使用 return 提前退出有返回值的函数， 必须在用 return 时提供返回值。
   - 非内部函数有些类型没法返回，比如限制的类型有：多维动态数组、结构体等。
   - 解构赋值一个函数返回多值时候，元素数量必须一样。
-- 函数的签名的逻辑是什么？为什么函数可以重载？
+# 解答：
+1. 修改状态变量
+描述: 任何对状态变量的写操作都将视为状态修改。
+function modifyState() public view {
+    stateVariable = 10; // 这不是一个 view 函数
+}
+2. 触发事件
+描述: 发出事件也会修改状态，因此触发事件的函数不能被标记为 view。
+event ExampleEvent(uint256 indexed value);
+function triggerEvent() public view {
+    emit ExampleEvent(1); // 这不是一个 view 函数
+}
+3. 创建其它合约
+描述: 部署新的合约会改变区块链状态，因此这种操作不允许在 view 函数中进行。
+function createContract() public view {
+    new SomeContract(); // 这不是一个 view 函数
+}
+4. 使用 selfdestruct
+描述: 调用 selfdestruct 会删除合约并改变状态，因此不能在 view 函数中使用。
+function kill() public view {
+    selfdestruct(payable(msg.sender)); // 这不是一个 view 函数
+}
+5. 通过调用发送以太币
+描述: 发送以太币会改变合约状态，因此在 view 函数中不能执行。
+function sendEther(address payable recipient) public view {
+    recipient.transfer(1 ether); // 这不是一个 view 函数
+}
+6. 调用未标记为 view 或 pure 的函数
+描述: 调用任何不符合 view 或 pure 限制的函数会导致状态修改。
+function nonViewFunction() public {
+    // 做一些状态修改
+}
+function callNonView() public view {
+    nonViewFunction(); // 这不是一个 view 函数
+}
+7. 使用底层调用
+描述: 使用低级调用（如 call）可能会导致状态修改，因此不能在 view 函数中使用。
+function lowLevelCall(address target) public view {
+    (bool success, ) = target.call(abi.encodeWithSignature("someFunction()")); // 这不是一个 view 函数
+}
+8. 使用包含特定操作码的内联汇编
+描述: 使用某些操作码（如 sstore）在内联汇编中会修改状态，因此不允许在 view 函数中出现。
+function inlineAssemblyExample() public view {
+    assembly {
+        sstore(0, 1) // 这不是一个 view 函数
+    }
+}
 
+# 函数的签名的逻辑是什么？为什么函数可以重载？ 
   - 核心: `bytes4(keccak256(bytes("transfer(address,uint256)")))`
   - 函数签名被定义为基础原型的规范表达，而基础原型是**函数名称加上由括号括起来的参数类型列表，参数类型间由一个逗号分隔开，且没有空格。**
-- 函数重载需要怎么样实现？
+# 解答：跟js的函数复用做比较来记忆
+1. 函数签名的定义——函数签名由以下部分组成：
+函数名称: 函数的名字。
+参数类型列表: 所有参数的类型，按顺序列出，并用逗号分隔，且不能有空格。
+2. 签名的计算
+函数签名通过将函数名称和参数类型组合在一起，然后计算其哈希值（使用 keccak256），最后取前 4 个字节来生成唯一标识符。示例：
+bytes4 signature = bytes4(keccak256("transfer(address,uint256)"));
+3. 函数重载的逻辑
+函数可以重载的原因在于：
+参数类型和数量的不同: Solidity 允许定义多个同名函数，只要它们的参数类型或参数数量不同。例如：
+function transfer(address to, uint256 amount) public;
+function transfer(address to, uint256 amount, string memory note) public;
+function transfer(address to) public;
+这些函数的签名分别为：
+transfer(address,uint256)
+transfer(address,uint256,string)
+transfer(address)
+由于它们的参数列表不同，因此可以同时存在。
+4. 函数重载的实际应用
+简化接口: 函数重载使得合约的接口更加简洁和灵活，用户可以根据不同的输入调用同一个函数名。
+增强可读性: 通过重载，同名函数可以根据不同的上下文执行不同的操作，增加代码的可读性和可维护性。
 
+# 函数重载需要怎么样实现？
   - **这些相同函数名的函数，参数(参数类型或参数数量)必须不一样。**，因为只有这样才能签出来不同的函数选择器。
   - 如果两个外部可见函数仅区别于 Solidity 内的类型，而不是它们的外部类型则会导致错误。很难理解，需要看例子。
-- 函数重载的参数匹配原理
+# 解答： 
+1. 实现函数重载的基本原则
+不同的参数类型或数量: 只有当函数的参数类型或参数数量不同，才能定义多个同名函数。这样可以生成不同的函数选择器（函数签名的前 4 个字节）。
+2. 注意事项
+外部可见性与内部类型: 如果两个外部可见的函数仅在 Solidity 内部类型上有所不同，而在外部类型上没有区别，将会导致编译错误。例如：
+contract Example {
+    // 函数签名: "transfer(address)"
+    function transfer(address to) public {
+        // 逻辑
+    }
 
+    // 函数签名: "transfer(uint160)" // 这里 uint160 是 address 的内部表示
+    function transfer(uint160 to) public {
+        // 逻辑
+    }
+}
+这里的第二个函数虽然类型不同，但在外部调用时都是地址，因此编译器会报错。解决方法是确保外部类型完全不同，或者使用不同的参数。
+3. 示例代码
+下面是一个完整的示例，展示如何正确实现函数重载：
+contract Token {
+    // 函数签名: "transfer(address,uint256)"
+    function transfer(address to, uint256 amount) public {
+        // 逻辑
+    }
+
+    // 函数签名: "transfer(address)"
+    function transfer(address to) public {
+        // 逻辑
+    }
+
+    // 函数签名: "transfer(address,uint256,string)"
+    function transfer(address to, uint256 amount, string memory note) public {
+        // 逻辑
+    }
+}
+
+# 函数重载的参数匹配原理
   - 通过将当前范围内的函数声明与函数调用中提供的参数相匹配，这样就可以选择重载函数。
   - 如果所有参数都可以隐式地转换为预期类型，则该函数作为重载候选项。如果一个匹配的都没有，解析失败。
   - 返回参数不作为重载解析的依据。
-- ` function f(uint8 val) public pure returns (uint8 out)` 和 `function f(uint256 val) public pure returns (uint256 out)` 是合法的函数重载么？
+# 解答：
+1. 参数匹配原理
+匹配过程: 当调用一个函数时，编译器会将函数调用中的参数与当前范围内的函数声明进行匹配。它会尝试找到一个合适的重载版本来处理传入的参数。
+2. 隐式转换
+隐式转换: 如果提供的参数可以隐式转换为函数预期的参数类型，则该函数被视为重载候选。例如：
+function example(uint256 x) public {}
+example(5); // 这里 5 是 uint 类型，可以隐式转换为 uint256
+匹配候选项: 如果所有参数都能找到合适的匹配，编译器会选择该函数。如果没有一个函数能够匹配，则解析失败并抛出错误。
+3. 没有匹配的情况
+解析失败: 如果提供的参数无法与任何重载候选项匹配，编译器会给出错误信息，提示没有找到匹配的函数。
+4. 返回参数不参与重载解析
+重要说明: 函数的返回类型不参与重载解析
+5. 示例代码
+以下是一个示例，展示参数匹配的不同情况：
+contract Example {
+    // 重载函数
+    function process(uint256 x) public {}
+    function process(uint8 x) public {}
+    function process(address x) public {}
 
-  - 不是的。
+    function callFunctions() public {
+        process(5); // 调用 process(uint8)
+        process(10); // 调用 process(uint256)
+
+        // 下面的调用会失败
+        // process("string"); // 错误: 找不到匹配的函数
+    }
+}
+
+# ` function f(uint8 val) public pure returns (uint8 out)` 和 `function f(uint256 val) public pure returns (uint256 out)` 是合法的函数重载么？
+# 解答： - 不是的。
   - 在 Remix 里,部署 A 合约，会将两个方法都渲染出来，调用 `f(50)`/`f(256)` 都可以。
   - 但是实际调用里，在其他合约内调用 `f(50)` 会导致类型错误，因为 `50` 既可以被隐式转换为 `uint8` 也可以被隐式转换为 `uint256`。 另一方面，调用 `f(256)` 则会解析为 `f(uint256)` 重载，因为 `256` 不能隐式转换为 `uint8`。
-- 函数修改器的意义是什么？有什么作用？
 
+# 函数修改器的意义是什么？有什么作用？
   - **意义**:我们可以将一些通用的操作提取出来，包装为函数修改器，来提高代码的复用性，改善编码效率。是函数高内聚，低耦合的延伸。
   - **作用**: `modifier` 常用于在函数执行前检查某种前置条件。
   - 比如地址对不对，余额是否充足，参数值是否允许等
   - 修改器内可以写逻辑
   - **特点**: `modifier` 是一种合约属性，可被继承，同时还可被派生的合约重写(override)。（修改器 modifier 是合约的可继承属性，并可能被派生合约覆盖 , 但前提是它们被标记为 virtual）。
   - `_` 符号可以在修改器中出现多次，每处都会替换为函数体。
-- Solidity 有哪些全局的数学和密码学函数？
+# 解答：
+1. 意义
+提高代码复用性: 修改器允许将通用的逻辑提取出来，封装成可重用的组件。这有助于减少代码重复，提高代码的整洁性和可维护性。
+增强代码结构: 修改器实现了函数的高内聚和低耦合，使得逻辑清晰、职责明确。
+2. 作用
+前置条件检查: 修改器通常用于在函数执行前进行某些条件检查，例如：
+检查调用者的地址是否有效。
+验证余额是否充足。
+确保传入参数符合预期。
+逻辑处理: 修改器可以包含任何必要的逻辑，不仅限于条件检查，可以用于修改状态或执行其他操作。
+3. 特点
+合约属性: 修改器是合约的一种属性，可以被继承，使得子合约能够重用父合约中的修改器。
+可重写: 如果将修改器标记为 virtual，子合约可以覆盖（override）该修改器，以提供特定的实现。
+多次使用 _: 修改器中的 _ 符号可以出现多次，每次都会被替换为修饰的函数体。例如：
+modifier onlyOwner() {
+    require(msg.sender == owner, "Not the owner");
+    _; // 这里是函数体的开始
+}
+modifier checkBalance(uint256 amount) {
+    require(balance[msg.sender] >= amount, "Insufficient balance");
+    _; // 这里是函数体的开始
+}
+function withdraw(uint256 amount) public onlyOwner checkBalance(amount) {
+    balance[msg.sender] -= amount; // 函数体
+    payable(msg.sender).transfer(amount); // 函数体
+}
+4. 示例代码
+下面是一个示例，展示如何使用修改器进行条件检查：
+contract Example {
+    address public owner;
+    mapping(address => uint256) public balance;
 
-  - 数学函数：
+    constructor() {
+        owner = msg.sender; // 合约创建者为所有者
+    }
+    
+    modifier onlyOwner() {
+        require(msg.sender == owner, "Not the owner");
+        _; // 函数体在这里执行
+    }
+
+    modifier hasSufficientBalance(uint256 amount) {
+        require(balance[msg.sender] >= amount, "Insufficient balance");
+        _; // 函数体在这里执行
+    }
+
+    function deposit() public payable {
+        balance[msg.sender] += msg.value; // 存款
+    }
+
+    function withdraw(uint256 amount) public onlyOwner hasSufficientBalance(amount) {
+        // 只有合约拥有者才能调用的逻辑
+        balance[msg.sender] -= amount; // 提款
+        payable(msg.sender).transfer(amount); // 发送以太币
+    }
+}
+
+# Solidity 有哪些全局的数学和密码学函数？
+# 解答：
+1. 数学函数：
   - `addmod(uint x, uint y, uint k) returns (uint)`
     - 计算 `(x + y) % k`，加法会在任意精度下执行，并且加法的结果即使超过 `2**256` 也不会被截取。从 0.5.0 版本的编译器开始会加入对 `k != 0` 的校验（assert）。
   - `mulmod(uint x, uint y, uint k) returns (uint)`
     - 计算 `(x * y) % k`，乘法会在任意精度下执行，并且乘法的结果即使超过 `2**256` 也不会被截取。从 0.5.0 版本的编译器开始会加入对 `k != 0` 的校验（assert）。
-  - 密码学函数：
+2. 密码学函数：
   - `keccak256((bytes memory) returns (bytes32)`
     - 计算 Keccak-256 哈希，之前 keccak256 的别名函数 **sha3** 在 **0.5.0** 中已经移除。。
   - `sha256(bytes memory) returns (bytes32)`
@@ -281,3 +602,4 @@ await contractA.updateValue(42);
       - s = 签名的第 2 个 32 字节
       - v = 签名的最后一个字节
     - ecrecover 返回一个 address, 而不是 address payable。
+   address payable地址表示可以转账以太坊。 
